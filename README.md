@@ -14,3 +14,8 @@ python3 simulator.py --seed 42 --max-turns 20
 ```bash
 python3 -m pytest -q
 ```
+
+## 다음 계획
+- 상세 단계는 `docs/next-plan.md`에 정리했다.
+- 우선순위: **전투 규칙 정확도 보강 → 카드/덱 시스템 실제화 → 맵 루프 연결**
+
