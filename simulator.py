@@ -7,7 +7,7 @@ import argparse
 import random
 from dataclasses import dataclass, field
 from math import floor
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 ELEMENTS = ("fire", "cold", "electric", "poison")
@@ -18,7 +18,6 @@ class Status:
     poison: int = 0
     vulnerable: int = 0
     weak: int = 0
-    burn: int = 0
 
 
 @dataclass
@@ -35,11 +34,27 @@ class Combatant:
         return self.hp > 0
 
 
+@dataclass(frozen=True)
+class Card:
+    name: str
+    cost: int
+    kind: str
+
+
+@dataclass
+class EnemyIntent:
+    action: str
+    value: int
+
+
 @dataclass
 class PlayerState:
     energy: int = 3
-    hand_size: int = 5
     max_hand_size: int = 10
+    draw_pile: List[Card] = field(default_factory=list)
+    discard_pile: List[Card] = field(default_factory=list)
+    exhaust_pile: List[Card] = field(default_factory=list)
+    hand: List[Card] = field(default_factory=list)
 
 
 @dataclass
@@ -47,6 +62,22 @@ class BattleResult:
     winner: str
     turns: int
     log: List[str]
+
+
+def create_starting_deck() -> List[Card]:
+    deck = [
+        Card("Strike", 1, "attack"),
+        Card("Strike", 1, "attack"),
+        Card("Strike", 1, "attack"),
+        Card("Strike", 1, "attack"),
+        Card("Guard", 1, "skill"),
+        Card("Guard", 1, "skill"),
+        Card("Guard", 1, "skill"),
+        Card("Ember", 1, "attack_fire"),
+        Card("Poison Dart", 1, "attack_poison"),
+        Card("Burn", 0, "status_burn"),
+    ]
+    return deck
 
 
 def calc_damage(attacker: Combatant, defender: Combatant, base_damage: int, element: str = "physical") -> int:
@@ -63,7 +94,7 @@ def calc_damage(attacker: Combatant, defender: Combatant, base_damage: int, elem
     return final
 
 
-def start_of_turn_status(target: Combatant, log: List[str]) -> None:
+def apply_poison(target: Combatant, log: List[str]) -> None:
     if target.status.poison > 0 and target.is_alive():
         poison_damage = target.status.poison
         target.hp -= poison_damage
@@ -71,74 +102,131 @@ def start_of_turn_status(target: Combatant, log: List[str]) -> None:
         target.status.poison -= 1
 
 
-def end_of_player_turn(player: Combatant, state: PlayerState, log: List[str]) -> None:
-    if player.status.burn > 0:
-        burn_damage = 2 * state.hand_size
+def shuffle_discard_into_draw(state: PlayerState, rng: random.Random, log: List[str]) -> None:
+    if not state.draw_pile and state.discard_pile:
+        state.draw_pile = list(state.discard_pile)
+        state.discard_pile.clear()
+        rng.shuffle(state.draw_pile)
+        log.append("- 드로우 더미 소진 → 버림 더미 셔플")
+
+
+def draw_cards(state: PlayerState, count: int, rng: random.Random, log: List[str]) -> None:
+    for _ in range(count):
+        if len(state.hand) >= state.max_hand_size:
+            log.append("- 최대 손패 도달: 추가 드로우 무시")
+            break
+        shuffle_discard_into_draw(state, rng, log)
+        if not state.draw_pile:
+            break
+        state.hand.append(state.draw_pile.pop())
+
+
+def choose_enemy_intent(rng: random.Random, enemy: Combatant) -> EnemyIntent:
+    roll = rng.choice(["attack", "attack", "buff", "debuff"])
+    if roll == "attack":
+        return EnemyIntent("attack", enemy.base_attack)
+    if roll == "buff":
+        return EnemyIntent("buff", 5)
+    if rng.random() < 0.5:
+        return EnemyIntent("debuff_vulnerable", 1)
+    return EnemyIntent("debuff_weak", 1)
+
+
+def describe_enemy_intent(intent: EnemyIntent) -> str:
+    if intent.action == "attack":
+        return f"공격 {intent.value}"
+    if intent.action == "buff":
+        return f"방어도 +{intent.value}"
+    if intent.action == "debuff_vulnerable":
+        return "취약 1 부여"
+    return "약화 1 부여"
+
+
+def resolve_card(card: Card, player: Combatant, enemy: Combatant, state: PlayerState, log: List[str]) -> None:
+    if card.kind == "attack":
+        damage = calc_damage(player, enemy, 6)
+        enemy.hp -= damage
+        log.append(f"- 플레이어 Strike {damage} (적 HP {enemy.hp}/{enemy.max_hp})")
+    elif card.kind == "skill":
+        player.block += 5
+        log.append(f"- 플레이어 Guard 방어도 +5 (현재 {player.block})")
+    elif card.kind == "attack_fire":
+        damage = calc_damage(player, enemy, 7, element="fire")
+        enemy.hp -= damage
+        log.append(f"- 플레이어 Ember(화염) {damage} (적 HP {enemy.hp}/{enemy.max_hp})")
+    elif card.kind == "attack_poison":
+        damage = calc_damage(player, enemy, 3, element="poison")
+        enemy.hp -= damage
+        enemy.status.poison += 2
+        log.append(f"- 플레이어 Poison Dart {damage} + 독2 (적 HP {enemy.hp}/{enemy.max_hp}, 독 {enemy.status.poison})")
+    else:
+        log.append("- Burn 카드: 사용 불가")
+
+    if card.kind == "status_burn":
+        state.exhaust_pile.append(card)
+    else:
+        state.discard_pile.append(card)
+
+
+def player_turn(player: Combatant, enemy: Combatant, state: PlayerState, rng: random.Random, log: List[str]) -> None:
+    state.energy = 3
+    draw_cards(state, 5, rng, log)
+    apply_poison(player, log)
+    if not player.is_alive():
+        return
+
+    while state.energy > 0 and enemy.is_alive():
+        playable_idx: Optional[int] = None
+        for i, card in enumerate(state.hand):
+            if card.cost <= state.energy and card.kind != "status_burn":
+                playable_idx = i
+                break
+        if playable_idx is None:
+            break
+
+        card = state.hand.pop(playable_idx)
+        state.energy -= card.cost
+        resolve_card(card, player, enemy, state, log)
+
+    burn_count = sum(1 for c in state.hand if c.kind == "status_burn")
+    if burn_count > 0:
+        burn_damage = burn_count * 2
         player.hp -= burn_damage
-        log.append(f"- {player.name} 화상 피해 {burn_damage} (HP {player.hp}/{player.max_hp})")
+        log.append(f"- 플레이어 화상(Burn) {burn_count}장 피해 {burn_damage} (HP {player.hp}/{player.max_hp})")
+
+    state.discard_pile.extend(state.hand)
+    state.hand.clear()
 
     if player.status.vulnerable > 0:
         player.status.vulnerable -= 1
     if player.status.weak > 0:
         player.status.weak -= 1
-
     player.block = 0
 
 
-def enemy_turn(enemy: Combatant, player: Combatant, log: List[str], rng: random.Random) -> None:
+def enemy_turn(enemy: Combatant, player: Combatant, intent: EnemyIntent, log: List[str]) -> None:
     if not enemy.is_alive():
         return
 
-    action = rng.choice(["attack", "attack", "buff", "debuff"])
-    if action == "attack":
-        damage = calc_damage(enemy, player, enemy.base_attack)
+    if intent.action == "attack":
+        damage = calc_damage(enemy, player, intent.value)
         player.hp -= damage
         log.append(f"- {enemy.name} 공격 {damage} (플레이어 HP {player.hp}/{player.max_hp})")
-    elif action == "buff":
-        enemy.block += 5
-        log.append(f"- {enemy.name} 방어도 +5")
+    elif intent.action == "buff":
+        enemy.block += intent.value
+        log.append(f"- {enemy.name} 방어도 +{intent.value}")
+    elif intent.action == "debuff_vulnerable":
+        player.status.vulnerable += intent.value
+        log.append(f"- {enemy.name} 취약 부여 (플레이어 취약 {player.status.vulnerable})")
     else:
-        if rng.random() < 0.5:
-            player.status.vulnerable += 1
-            log.append(f"- {enemy.name} 취약 부여 (플레이어 취약 {player.status.vulnerable})")
-        else:
-            player.status.weak += 1
-            log.append(f"- {enemy.name} 약화 부여 (플레이어 약화 {player.status.weak})")
+        player.status.weak += intent.value
+        log.append(f"- {enemy.name} 약화 부여 (플레이어 약화 {player.status.weak})")
 
-
-def player_turn(player: Combatant, enemy: Combatant, state: PlayerState, log: List[str], rng: random.Random) -> None:
-    state.energy = 3
-    state.hand_size = min(5, state.max_hand_size)
-    start_of_turn_status(player, log)
-    if not player.is_alive():
-        return
-
-    while state.energy > 0 and enemy.is_alive():
-        card = rng.choice(["strike", "strike", "guard", "ember", "poison_dart"])
-        if card == "strike":
-            damage = calc_damage(player, enemy, 6)
-            enemy.hp -= damage
-            log.append(f"- 플레이어 Strike {damage} (적 HP {enemy.hp}/{enemy.max_hp})")
-            state.energy -= 1
-        elif card == "guard":
-            player.block += 5
-            log.append(f"- 플레이어 Guard 방어도 +5 (현재 {player.block})")
-            state.energy -= 1
-        elif card == "ember":
-            damage = calc_damage(player, enemy, 7, element="fire")
-            enemy.hp -= damage
-            log.append(f"- 플레이어 Ember(화염) {damage} (적 HP {enemy.hp}/{enemy.max_hp})")
-            state.energy -= 1
-        else:
-            damage = calc_damage(player, enemy, 3, element="poison")
-            enemy.hp -= damage
-            enemy.status.poison += 2
-            log.append(
-                f"- 플레이어 Poison Dart {damage} + 독2 (적 HP {enemy.hp}/{enemy.max_hp}, 독 {enemy.status.poison})"
-            )
-            state.energy -= 1
-
-    end_of_player_turn(player, state, log)
+    if enemy.status.vulnerable > 0:
+        enemy.status.vulnerable -= 1
+    if enemy.status.weak > 0:
+        enemy.status.weak -= 1
+    enemy.block = 0
 
 
 def run_battle(seed: int = 42, max_turns: int = 20) -> BattleResult:
@@ -153,22 +241,29 @@ def run_battle(seed: int = 42, max_turns: int = 20) -> BattleResult:
         resist={"fire": 0.3, "cold": 0.1, "electric": 0.0, "poison": 0.25},
     )
     enemy = Combatant(name="슬라임 엘리트", hp=55, max_hp=55, base_attack=9, resist={"poison": 0.2})
-    player_state = PlayerState()
+
+    deck = create_starting_deck()
+    rng.shuffle(deck)
+    state = PlayerState(draw_pile=deck)
+
+    next_enemy_intent = choose_enemy_intent(rng, enemy)
 
     for turn in range(1, max_turns + 1):
         if not player.is_alive() or not enemy.is_alive():
             break
 
         log.append(f"\n[턴 {turn}] 시작")
-        player_turn(player, enemy, player_state, log, rng)
+        log.append(f"- 적 의도(Intent): {describe_enemy_intent(next_enemy_intent)}")
+        player_turn(player, enemy, state, rng, log)
 
         if not enemy.is_alive():
             log.append("- 적 전멸! 전투 승리")
             return BattleResult(winner="player", turns=turn, log=log)
 
-        start_of_turn_status(enemy, log)
+        apply_poison(enemy, log)
         if enemy.is_alive():
-            enemy_turn(enemy, player, log, rng)
+            enemy_turn(enemy, player, next_enemy_intent, log)
+            next_enemy_intent = choose_enemy_intent(rng, enemy)
 
         if not player.is_alive():
             log.append("- 플레이어 사망. 런 종료")
