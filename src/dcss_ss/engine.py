@@ -195,7 +195,7 @@ DEFAULT_DECK = [
 ]
 
 
-def run_sample_battle(seed: int = 7) -> CombatState:
+def run_sample_battle(seed: int = 7, max_turns: int = 6) -> CombatState:
     engine = CombatEngine(rng_seed=seed)
     draw = DEFAULT_DECK[:]
     engine.rng.shuffle(draw)
@@ -210,7 +210,7 @@ def run_sample_battle(seed: int = 7) -> CombatState:
     state.player.statuses.burn = 1
     state.enemy.statuses.vulnerable = 1
 
-    while state.player.is_alive() and state.enemy.is_alive() and state.turn <= 6:
+    while state.player.is_alive() and state.enemy.is_alive() and state.turn <= max_turns:
         engine.start_turn(state)
         while state.energy > 0 and state.enemy.is_alive():
             engine.play_strike(state, element="fire")
