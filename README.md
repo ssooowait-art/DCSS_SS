@@ -2,22 +2,23 @@
 던전크롤과 슬레이더스파이어 합친 게임 만들어볼게
 
 ## 현재 상태
-이 저장소는 우선 기획 문서(`docs/core-loop.md`)를 기준으로,
-MVP 전투 루프를 검증하기 위한 **CLI 시뮬레이터**를 포함한다.
-현재는 드로우/버림/소멸 더미, 적 Intent 예고, Burn 카드 기반 턴 종료 피해,
-그리고 전투→보상→노드 이동을 잇는 간단한 `act` 모드까지 반영했다.
+`simulator.py`로 **Act 1(15층 + 보스)** 를 끝까지 진행하는 텍스트 기반 게임 루프를 실행할 수 있다.
 
-## 빠른 실행
+포함된 요소:
+- 전투: 에너지/드로우/버림/소멸/손패, 상태이상(독/취약/약화/Burn 카드), 저항(화염/냉기/전기/독), 적 Intent
+- 런 루프: 노드 진행(일반/엘리트/휴식/상점/이벤트/보스), 전투 보상(골드/카드/유물), 휴식/상점/이벤트 처리
+- 종족 2종: `human`, `draconian`
+
+## 실행
 ```bash
-python3 simulator.py --mode battle --seed 42 --max-turns 20
-python3 simulator.py --mode act --seed 42 --floors 6
+# 전체 런 실행 (기본)
+python3 simulator.py --mode run --seed 42 --species human
+
+# 단일 전투 실행
+python3 simulator.py --mode battle --seed 42 --species draconian
 ```
 
 ## 테스트
 ```bash
 python3 -m pytest -q
 ```
-
-## 다음 계획
-- 상세 단계는 `docs/next-plan.md`에 정리했다.
-- 우선순위: **전투 규칙 정확도 보강 → 카드/덱 시스템 실제화 → 맵 루프 연결**
