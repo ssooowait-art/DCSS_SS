@@ -4,18 +4,20 @@ import simulator
 
 
 def test_battle_runs_and_returns_winner():
-    result = simulator.run_battle(seed=42, max_turns=20)
+    result, _, _ = simulator.run_battle(seed=42, max_turns=20)
     assert result.winner in {"player", "enemy", "draw"}
     assert result.turns >= 1
     assert any("의도(Intent)" in line for line in result.log)
 
 
 def test_seed_reproducible():
-    result1 = simulator.run_battle(seed=7, max_turns=12)
-    result2 = simulator.run_battle(seed=7, max_turns=12)
+    result1, deck1, hp1 = simulator.run_battle(seed=7, max_turns=12)
+    result2, deck2, hp2 = simulator.run_battle(seed=7, max_turns=12)
     assert result1.winner == result2.winner
     assert result1.turns == result2.turns
     assert result1.log == result2.log
+    assert deck1 == deck2
+    assert hp1 == hp2
 
 
 def test_draw_from_discard_when_draw_empty():
@@ -41,3 +43,13 @@ def test_burn_damage_uses_cards_remaining_in_hand():
 
     assert player.hp == 26
     assert any("화상(Burn)" in line for line in log)
+
+
+def test_act_mode_reproducible():
+    run1 = simulator.run_act(seed=21, floors=6)
+    run2 = simulator.run_act(seed=21, floors=6)
+    assert run1.cleared == run2.cleared
+    assert run1.floor_reached == run2.floor_reached
+    assert run1.gold == run2.gold
+    assert run1.deck_size == run2.deck_size
+    assert run1.log == run2.log

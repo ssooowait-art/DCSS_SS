@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DCSS_SS MVP 전투 루프 CLI 시뮬레이터."""
+"""DCSS_SS MVP 전투/맵 루프 CLI 시뮬레이터."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import argparse
 import random
 from dataclasses import dataclass, field
 from math import floor
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 ELEMENTS = ("fire", "cold", "electric", "poison")
@@ -64,8 +64,17 @@ class BattleResult:
     log: List[str]
 
 
+@dataclass
+class RunResult:
+    cleared: bool
+    floor_reached: int
+    gold: int
+    deck_size: int
+    log: List[str]
+
+
 def create_starting_deck() -> List[Card]:
-    deck = [
+    return [
         Card("Strike", 1, "attack"),
         Card("Strike", 1, "attack"),
         Card("Strike", 1, "attack"),
@@ -77,7 +86,15 @@ def create_starting_deck() -> List[Card]:
         Card("Poison Dart", 1, "attack_poison"),
         Card("Burn", 0, "status_burn"),
     ]
-    return deck
+
+
+def reward_card_pool() -> List[Card]:
+    return [
+        Card("Strike+", 1, "attack_plus"),
+        Card("Shield", 1, "skill_plus"),
+        Card("Spark", 1, "attack_electric"),
+        Card("Frost Bite", 1, "attack_cold"),
+    ]
 
 
 def calc_damage(attacker: Combatant, defender: Combatant, base_damage: int, element: str = "physical") -> int:
@@ -159,6 +176,23 @@ def resolve_card(card: Card, player: Combatant, enemy: Combatant, state: PlayerS
         enemy.hp -= damage
         enemy.status.poison += 2
         log.append(f"- 플레이어 Poison Dart {damage} + 독2 (적 HP {enemy.hp}/{enemy.max_hp}, 독 {enemy.status.poison})")
+    elif card.kind == "attack_plus":
+        damage = calc_damage(player, enemy, 9)
+        enemy.hp -= damage
+        log.append(f"- 플레이어 Strike+ {damage} (적 HP {enemy.hp}/{enemy.max_hp})")
+    elif card.kind == "skill_plus":
+        player.block += 8
+        log.append(f"- 플레이어 Shield 방어도 +8 (현재 {player.block})")
+    elif card.kind == "attack_electric":
+        damage = calc_damage(player, enemy, 6, element="electric")
+        enemy.hp -= damage
+        enemy.status.vulnerable += 1
+        log.append(f"- 플레이어 Spark(전기) {damage} + 취약1 (적 HP {enemy.hp}/{enemy.max_hp})")
+    elif card.kind == "attack_cold":
+        damage = calc_damage(player, enemy, 5, element="cold")
+        enemy.hp -= damage
+        enemy.status.weak += 1
+        log.append(f"- 플레이어 Frost Bite(냉기) {damage} + 약화1 (적 HP {enemy.hp}/{enemy.max_hp})")
     else:
         log.append("- Burn 카드: 사용 불가")
 
@@ -229,22 +263,40 @@ def enemy_turn(enemy: Combatant, player: Combatant, intent: EnemyIntent, log: Li
     enemy.block = 0
 
 
-def run_battle(seed: int = 42, max_turns: int = 20) -> BattleResult:
+def collect_current_deck(state: PlayerState) -> List[Card]:
+    return list(state.draw_pile) + list(state.discard_pile) + list(state.hand) + list(state.exhaust_pile)
+
+
+def build_enemy(node_type: str) -> Combatant:
+    if node_type == "elite":
+        return Combatant(name="슬라임 엘리트", hp=70, max_hp=70, base_attack=11, resist={"poison": 0.2})
+    if node_type == "boss":
+        return Combatant(name="슬라임 군주", hp=110, max_hp=110, base_attack=14, resist={"poison": 0.3, "fire": 0.2})
+    return Combatant(name="슬라임", hp=45, max_hp=45, base_attack=8, resist={"poison": 0.1})
+
+
+def run_battle(
+    seed: int = 42,
+    max_turns: int = 20,
+    deck: Optional[List[Card]] = None,
+    player_hp: int = 80,
+    enemy_type: str = "normal",
+) -> Tuple[BattleResult, List[Card], int]:
     rng = random.Random(seed)
     log: List[str] = []
 
     player = Combatant(
         name="플레이어",
-        hp=80,
+        hp=player_hp,
         max_hp=80,
         base_attack=6,
         resist={"fire": 0.3, "cold": 0.1, "electric": 0.0, "poison": 0.25},
     )
-    enemy = Combatant(name="슬라임 엘리트", hp=55, max_hp=55, base_attack=9, resist={"poison": 0.2})
+    enemy = build_enemy(enemy_type)
 
-    deck = create_starting_deck()
-    rng.shuffle(deck)
-    state = PlayerState(draw_pile=deck)
+    working_deck = list(deck) if deck is not None else create_starting_deck()
+    rng.shuffle(working_deck)
+    state = PlayerState(draw_pile=working_deck)
 
     next_enemy_intent = choose_enemy_intent(rng, enemy)
 
@@ -258,7 +310,7 @@ def run_battle(seed: int = 42, max_turns: int = 20) -> BattleResult:
 
         if not enemy.is_alive():
             log.append("- 적 전멸! 전투 승리")
-            return BattleResult(winner="player", turns=turn, log=log)
+            return BattleResult(winner="player", turns=turn, log=log), collect_current_deck(state), player.hp
 
         apply_poison(enemy, log)
         if enemy.is_alive():
@@ -267,7 +319,7 @@ def run_battle(seed: int = 42, max_turns: int = 20) -> BattleResult:
 
         if not player.is_alive():
             log.append("- 플레이어 사망. 런 종료")
-            return BattleResult(winner="enemy", turns=turn, log=log)
+            return BattleResult(winner="enemy", turns=turn, log=log), collect_current_deck(state), 0
 
     winner = "draw"
     if player.hp > enemy.hp:
@@ -276,22 +328,91 @@ def run_battle(seed: int = 42, max_turns: int = 20) -> BattleResult:
         winner = "enemy"
 
     log.append(f"- 최대 턴({max_turns}) 도달. 판정 승자: {winner}")
-    return BattleResult(winner=winner, turns=max_turns, log=log)
+    return BattleResult(winner=winner, turns=max_turns, log=log), collect_current_deck(state), max(player.hp, 0)
+
+
+def run_act(seed: int = 42, floors: int = 6) -> RunResult:
+    rng = random.Random(seed)
+    log: List[str] = []
+    deck = create_starting_deck()
+    hp = 80
+    gold = 0
+
+    node_path = ["normal", "normal", "event", "elite", "rest", "boss"]
+    if floors != 6:
+        node_path = ["normal"] * max(1, floors - 1) + ["boss"]
+
+    for floor, node in enumerate(node_path, start=1):
+        log.append(f"\n=== 층 {floor} / 노드: {node} ===")
+
+        if node in {"normal", "elite", "boss"}:
+            battle_seed = rng.randint(0, 10**6)
+            battle, current_deck, hp_after = run_battle(
+                seed=battle_seed,
+                max_turns=25,
+                deck=deck,
+                player_hp=hp,
+                enemy_type=node,
+            )
+            log.extend(battle.log)
+            deck = current_deck
+            hp = hp_after
+            if battle.winner != "player":
+                return RunResult(False, floor, gold, len(deck), log)
+
+            earned_gold = 15 if node == "normal" else 30 if node == "elite" else 60
+            gold += earned_gold
+            log.append(f"- 보상: 골드 +{earned_gold} (총 {gold})")
+
+            reward = rng.choice(reward_card_pool())
+            deck.append(reward)
+            log.append(f"- 보상 카드 획득: {reward.name} (덱 {len(deck)}장)")
+
+        elif node == "rest":
+            heal = min(20, 80 - hp)
+            hp += heal
+            log.append(f"- 휴식: HP +{heal} (현재 {hp}/80)")
+        elif node == "event":
+            if rng.random() < 0.5:
+                hp_loss = min(6, hp - 1)
+                hp -= hp_loss
+                bonus_gold = 40
+                gold += bonus_gold
+                log.append(f"- 이벤트: 위험 선택, HP -{hp_loss}, 골드 +{bonus_gold} (총 {gold})")
+            else:
+                bonus_card = Card("Event Sigil", 1, "skill_plus")
+                deck.append(bonus_card)
+                log.append(f"- 이벤트: 카드 획득 {bonus_card.name} (덱 {len(deck)}장)")
+
+    return RunResult(True, len(node_path), gold, len(deck), log)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="DCSS_SS 전투 루프 CLI 시뮬레이터")
+    parser = argparse.ArgumentParser(description="DCSS_SS 전투/맵 루프 CLI 시뮬레이터")
     parser.add_argument("--seed", type=int, default=42, help="난수 시드")
     parser.add_argument("--max-turns", type=int, default=20, help="최대 턴 수")
+    parser.add_argument("--mode", choices=["battle", "act"], default="battle", help="실행 모드")
+    parser.add_argument("--floors", type=int, default=6, help="act 모드 층 수")
     args = parser.parse_args()
 
-    result = run_battle(seed=args.seed, max_turns=args.max_turns)
-    print("=== 전투 로그 ===")
-    for line in result.log:
-        print(line)
-    print("\n=== 결과 ===")
-    print(f"승자: {result.winner}")
-    print(f"턴 수: {result.turns}")
+    if args.mode == "battle":
+        result, _, _ = run_battle(seed=args.seed, max_turns=args.max_turns)
+        print("=== 전투 로그 ===")
+        for line in result.log:
+            print(line)
+        print("\n=== 결과 ===")
+        print(f"승자: {result.winner}")
+        print(f"턴 수: {result.turns}")
+    else:
+        run = run_act(seed=args.seed, floors=args.floors)
+        print("=== 런 로그 ===")
+        for line in run.log:
+            print(line)
+        print("\n=== 런 결과 ===")
+        print(f"클리어: {run.cleared}")
+        print(f"도달 층: {run.floor_reached}")
+        print(f"골드: {run.gold}")
+        print(f"덱 크기: {run.deck_size}")
 
 
 if __name__ == "__main__":
